@@ -1,0 +1,8 @@
+# 配置文件中的敏感信息
+config/microsocks.config.example
+config/tinyproxy.conf.example
+
+# 系统特定文件
+config/hosts
+config/hostname
+config/resolv.conf

@@ -1,0 +1,556 @@
+#!/bin/sh
+# ============================================================
+#  US-COX 代理管理脚本 v5
+#  SOCKS5 : Microsocks   HTTP : Tinyproxy
+#  防火墙 : iptables (白名单 + SSH 防暴力)
+# ============================================================
+
+CONF="/etc/microsocks/config"
+SBIN="/usr/local/bin/microsocks"
+SBIN_BAK="/usr/local/bin/microsocks.bak"
+HCONF="/etc/tinyproxy/tinyproxy.conf"
+REPO="https://github.com/rofl0r/microsocks"
+HLOCK="/tmp/.socks_health_lock"
+WL_FILE="/etc/proxy-whitelist/ips.conf"
+FW="/etc/proxy-whitelist/firewall.sh"
+PUBLIC_IP="23.80.91.245"
+
+R='\033[0;31m' G='\033[0;32m' Y='\033[0;33m' C='\033[0;36m' B='\033[1m' D='\033[2m' N='\033[0m'
+
+# ── 配置 ──
+
+load_conf() {
+    [ -f "$CONF" ] && . "$CONF"
+    S_USER="${SOCKS_USER:-uscox}"; S_PASS="${SOCKS_PASS:-}"; S_PORT="${SOCKS_PORT:-25022}"
+    H_USER="${HTTP_USER:-${S_USER}}"; H_PASS="${HTTP_PASS:-${S_PASS}}"; H_PORT="${HTTP_PORT:-25023}"
+}
+
+save_conf() {
+    mkdir -p "$(dirname "$CONF")"
+    cat > "$CONF" << CE
+SOCKS_USER="$1"
+SOCKS_PASS="$2"
+SOCKS_PORT="$3"
+HTTP_USER="$4"
+HTTP_PASS="$5"
+HTTP_PORT="$6"
+CE
+    chmod 600 "$CONF"; _sync_http
+}
+
+_sync_http() {
+    load_conf
+    cat > "$HCONF" << TPEOF
+User tinyproxy
+Group tinyproxy
+Port ${H_PORT}
+Listen 0.0.0.0
+Timeout 300
+MaxClients 20
+MaxRequestsPerChild 0
+MinSpareServers 2
+MaxSpareServers 5
+StartServers 2
+BasicAuth ${H_USER} ${H_PASS}
+LogLevel Warning
+LogFile "/var/log/tinyproxy/tinyproxy.log"
+DisableViaHeader Yes
+ViaProxyName "us-cox"
+DefaultErrorFile "/usr/share/tinyproxy/default.html"
+StatFile "/usr/share/tinyproxy/stats.html"
+ConnectPort 443
+ConnectPort 80
+ConnectPort 25
+ConnectPort 110
+ConnectPort 143
+ConnectPort 465
+ConnectPort 587
+ConnectPort 993
+ConnectPort 995
+ConnectPort 8080
+ConnectPort 8443
+TPEOF
+}
+
+migrate_conf() {
+    [ ! -f "$CONF" ] && return; . "$CONF"
+    [ -n "${MICROSOCKS_USER}" ] && [ -z "${SOCKS_USER}" ] && \
+        save_conf "${MICROSOCKS_USER}" "${MICROSOCKS_PASS}" "${MICROSOCKS_PORT:-25022}" \
+                  "${MICROSOCKS_USER}" "${MICROSOCKS_PASS}" "25023"
+}
+
+# ── 服务 ──
+
+s_restart() { rc-service microsocks restart >/dev/null 2>&1; sleep 0.3; }
+h_restart() { rc-service tinyproxy restart >/dev/null 2>&1; sleep 0.3; }
+all_restart() {
+    s_restart; h_restart
+    if rc-service microsocks status >/dev/null 2>&1 && rc-service tinyproxy status >/dev/null 2>&1; then
+        printf "${G}✔ 服务已重启${N}\n"
+    else
+        printf "${R}✘ 部分服务重启失败${N}\n"
+    fi
+}
+
+# ── UI ──
+
+box_top()   { printf "${C}${B}╔══════════════════════════════════════════╗${N}\n"; }
+box_title() { printf "${C}${B}║${N}  %-$((40))s ${C}${B}║${N}\n" "$1"; }
+box_sep()   { printf "${C}${B}╠══════════════════════════════════════════╣${N}\n"; }
+box_row()   { printf "${C}${B}║${N}  ${G}%s${N}) %-$((37-${#1}))s ${C}${B}║${N}\n" "$1" "$2"; }
+box_hdr()   { printf "${C}${B}║${N}  ${D}%-$((40))s${C}${B}║${N}\n" "$1"; }
+box_blank() { printf "${C}${B}║${N}                                          ${C}${B}║${N}\n"; }
+box_bot()   { printf "${C}${B}╚══════════════════════════════════════════╝${N}\n"; }
+box_kv()    { local _v="$2"; local _p=$(( 30 - ${#_v} )); [ "$_p" -lt 0 ] && _p=0; printf "${C}${B}║${N}  %s:  %s%${_p}s ${C}${B}║${N}\n" "$1" "$_v" ""; }
+box_hint()  { printf "${C}${B}║${N}  ${D}%-$((40))s${C}${B}║${N}\n" "$1"; }
+pause_key() { printf "\n${D}按回车键返回...${N}"; read _x; }
+gen_pass()  { openssl rand -hex 8 2>/dev/null || cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 16; }
+check_ip()  { load_conf; curl -x socks5h://${S_USER}:${S_PASS}@127.0.0.1:${S_PORT} -s --connect-timeout 3 https://httpbin.org/ip 2>/dev/null | grep -o '"origin": *"[^"]*"' | cut -d'"' -f4; }
+
+# 读选项, 空输入=返回
+read_choice() {
+    printf "请选择: "; read C
+    [ -z "$C" ] && return 1
+    return 0
+}
+
+# ── 主菜单 ──
+
+main_menu() {
+    while true; do
+        clear
+        box_top; box_title "US-COX  代理管理  v5"
+        box_sep; box_blank
+        box_hdr "[ 1 ] 服务管理"
+        box_hdr "[ 2 ] SOCKS5 代理"
+        box_hdr "[ 3 ] HTTP   代理"
+        box_hdr "[ 4 ] 防火墙"
+        box_hdr "[ 5 ] 维护工具"
+        box_blank
+        box_hint "  0 = 退出, 回车 = 退出"
+        box_bot
+        printf "请选择: "; read C
+        case "$C" in
+            1) menu_service ;;
+            2) menu_socks ;;
+            3) menu_http ;;
+            4) menu_firewall ;;
+            5) menu_maint ;;
+            0|'') printf "${C}再见${N}\n"; exit 0 ;;
+            *) printf "${R}无效选项${N}\n"; sleep 0.5 ;;
+        esac
+    done
+}
+
+# ── 1. 服务管理 ──
+
+menu_service() {
+    load_conf
+    while true; do
+        clear; box_top; box_title "服务管理"; box_sep; box_blank
+        if rc-service microsocks status >/dev/null 2>&1; then
+            printf "${C}${B}║${N}  SOCKS5:  ${G}● 运行中${N}  端口 %s" "$S_PORT"; _p=$((21-${#S_PORT})); [ "$_p" -lt 0 ] && _p=0; printf "%${_p}s ${C}${B}║${N}\n" ""
+        else
+            printf "${C}${B}║${N}  SOCKS5:  ${R}○ 已停止${N}                      ${C}${B}║${N}\n"
+        fi
+        if rc-service tinyproxy status >/dev/null 2>&1; then
+            printf "${C}${B}║${N}  HTTP:    ${G}● 运行中${N}  端口 %s" "$H_PORT"; _p=$((21-${#H_PORT})); [ "$_p" -lt 0 ] && _p=0; printf "%${_p}s ${C}${B}║${N}\n" ""
+        else
+            printf "${C}${B}║${N}  HTTP:    ${R}○ 已停止${N}                      ${C}${B}║${N}\n"
+        fi
+        FWS=$(/bin/sh "$FW" wl-status 2>/dev/null)
+        if [ "$FWS" = "ON" ]; then
+            WLC=$(/bin/sh "$FW" wl-list 2>/dev/null | wc -l)
+            printf "${C}${B}║${N}  防火墙:  ${G}● 已启用${N}  白名单 %s 个 IP" "$WLC"; _p=$((17-${#WLC})); [ "$_p" -lt 0 ] && _p=0; printf "%${_p}s ${C}${B}║${N}\n" ""
+        else
+            printf "${C}${B}║${N}  防火墙:  ${Y}○ 未启用${N}                      ${C}${B}║${N}\n"
+        fi
+        SSHS=$(/bin/sh "$FW" ssh-status 2>/dev/null)
+        printf "${C}${B}║${N}  SSH防护: "; [ "$SSHS" = "ON" ] && printf "${G}● 已启用${N}" || printf "${Y}○ 未启用${N}"; printf "                    ${C}${B}║${N}\n"
+        OUTIP=$(check_ip)
+        printf "${C}${B}║${N}  出口 IP: %s" "${OUTIP:-(检测失败)}"; _p=$((29-${#OUTIP})); [ "$_p" -lt 0 ] && _p=0; printf "%${_p}s ${C}${B}║${N}\n" ""
+        box_sep; box_blank
+        box_row "1" "启动全部"; box_row "2" "停止全部"; box_row "3" "重启全部"
+        box_blank; box_hint "  回车 = 返回上级"; box_bot
+        read_choice || return
+        case "$C" in
+            1) rc-service microsocks start >/dev/null 2>&1; rc-service tinyproxy start >/dev/null 2>&1; printf "${G}✔ 全部已启动${N}\n"; sleep 1 ;;
+            2) rc-service microsocks stop  >/dev/null 2>&1; rc-service tinyproxy stop  >/dev/null 2>&1; printf "${Y}✔ 全部已停止${N}\n"; sleep 1 ;;
+            3) all_restart; sleep 1 ;;
+            *) printf "${R}无效选项${N}\n"; sleep 0.5 ;;
+        esac
+    done
+}
+
+# ── 2. SOCKS5 ──
+
+menu_socks() {
+    load_conf
+    while true; do
+        clear; box_top; box_title "SOCKS5  ·  端口 ${S_PORT}"; box_sep; box_blank
+        box_kv "用户名" "$S_USER"; box_kv "密  码" "$S_PASS"
+        box_sep; box_blank
+        box_row "1" "查看连接信息"
+        box_blank
+        box_row "2" "修改用户名"; box_row "3" "修改密码"; box_row "4" "随机生成密码"
+        box_blank; box_hint "  回车 = 返回上级"; box_bot
+        read_choice || return
+        case "$C" in
+            1) _show_info socks5 ;;
+            2) _set_user socks ;;
+            3) _set_pass socks ;;
+            4) _gen_pass socks ;;
+            *) printf "${R}无效选项${N}\n"; sleep 0.5 ;;
+        esac
+    done
+}
+
+# ── 3. HTTP ──
+
+menu_http() {
+    load_conf
+    while true; do
+        clear; box_top; box_title "HTTP  ·  端口 ${H_PORT}"; box_sep; box_blank
+        box_kv "用户名" "$H_USER"; box_kv "密  码" "$H_PASS"
+        box_sep; box_blank
+        box_row "1" "查看连接信息"
+        box_blank
+        box_row "2" "修改用户名"; box_row "3" "修改密码"; box_row "4" "随机生成密码"
+        box_blank; box_hint "  回车 = 返回上级"; box_bot
+        read_choice || return
+        case "$C" in
+            1) _show_info http ;;
+            2) _set_user http ;;
+            3) _set_pass http ;;
+            4) _gen_pass http ;;
+            *) printf "${R}无效选项${N}\n"; sleep 0.5 ;;
+        esac
+    done
+}
+
+# ── 查看连接信息 ──
+
+_show_info() {
+    load_conf; printf "\n"
+    if [ "$1" = "socks5" ]; then
+        printf "${B}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}\n"
+        printf "${B}  SOCKS5 连接信息${N}\n"
+        printf "${B}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}\n\n"
+        printf "  地址:  ${G}%s${N}\n" "$PUBLIC_IP"
+        printf "  端口:  ${G}%s${N}\n" "$S_PORT"
+        printf "  用户:  ${G}%s${N}\n" "$S_USER"
+        printf "  密码:  ${G}%s${N}\n\n" "$S_PASS"
+        printf "${D}── 浏览器 / SwitchyOmega ──${N}\n"
+        printf "  协议: ${C}SOCKS5${N}  地址: ${C}%s${N}  端口: ${C}%s${N}\n\n" "$PUBLIC_IP" "$S_PORT"
+        printf "${D}── curl ──${N}\n"
+        printf "  ${Y}curl -x socks5h://%s:%s@%s:%s https://httpbin.org/ip${N}\n\n" "$S_USER" "$S_PASS" "$PUBLIC_IP" "$S_PORT"
+        printf "${D}── 命令行环境变量 ──${N}\n"
+        printf "  ${Y}export ALL_PROXY=socks5h://%s:%s@%s:%s${N}\n" "$S_USER" "$S_PASS" "$PUBLIC_IP" "$S_PORT"
+        printf "  ${Y}export http_proxy=\$ALL_PROXY${N}\n" "$S_USER" "$S_PASS" "$PUBLIC_IP" "$S_PORT"
+        printf "  ${Y}export https_proxy=\$ALL_PROXY${N}\n\n" "$S_USER" "$S_PASS" "$PUBLIC_IP" "$S_PORT"
+        printf "${D}── git 走代理 ──${N}\n"
+        printf "  ${Y}git config --global http.proxy socks5h://%s:%s@%s:%s${N}\n\n" "$S_USER" "$S_PASS" "$PUBLIC_IP" "$S_PORT"
+        printf "${D}── SSH 动态转发 (本机开 SOCKS5) ──${N}\n"
+        printf "  ${Y}ssh -D 1080 -N -f -p 25021 root@%s${N}\n" "$PUBLIC_IP"
+        printf "  ${D}然后 curl -x socks5h://127.0.0.1:1080 URL${N}\n\n"
+    else
+        printf "${B}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}\n"
+        printf "${B}  HTTP 连接信息${N}\n"
+        printf "${B}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}\n\n"
+        printf "  地址:  ${G}%s${N}\n" "$PUBLIC_IP"
+        printf "  端口:  ${G}%s${N}\n" "$H_PORT"
+        printf "  用户:  ${G}%s${N}\n" "$H_USER"
+        printf "  密码:  ${G}%s${N}\n\n" "$H_PASS"
+        printf "${D}── 系统 / 浏览器 HTTP 代理 ──${N}\n"
+        printf "  地址: ${C}%s${N}  端口: ${C}%s${N}\n\n" "$PUBLIC_IP" "$H_PORT"
+        printf "${D}── curl ──${N}\n"
+        printf "  ${Y}curl -x http://%s:%s@%s:%s https://httpbin.org/ip${N}\n\n" "$H_USER" "$H_PASS" "$PUBLIC_IP" "$H_PORT"
+        printf "${D}── 命令行环境变量 ──${N}\n"
+        printf "  ${Y}export http_proxy=http://%s:%s@%s:%s${N}\n" "$H_USER" "$H_PASS" "$PUBLIC_IP" "$H_PORT"
+        printf "  ${Y}export https_proxy=http://%s:%s@%s:%s${N}\n\n" "$H_USER" "$H_PASS" "$PUBLIC_IP" "$H_PORT"
+        printf "${D}── wget ──${N}\n"
+        printf "  ${Y}wget -e http_proxy=http://%s:%s@%s:%s URL${N}\n\n" "$H_USER" "$H_PASS" "$PUBLIC_IP" "$H_PORT"
+        printf "${D}── git 走代理 ──${N}\n"
+        printf "  ${Y}git config --global http.proxy http://%s:%s@%s:%s${N}\n\n" "$H_USER" "$H_PASS" "$PUBLIC_IP" "$H_PORT"
+    fi
+    pause_key
+}
+
+# ── 配置操作 ──
+
+_set_user() {
+    load_conf; local label="SOCKS5"; local cur="$S_USER"
+    [ "$1" = "http" ] && { label="HTTP"; cur="$H_USER"; }
+    printf "\n当前 %s 用户名: %s\n新用户名 (留空取消): " "$label" "$cur"; read NEW
+    [ -z "$NEW" ] && printf "${Y}已取消${N}\n" && { sleep 1; return; }
+    if [ "$1" = "socks" ]; then save_conf "$NEW" "$S_PASS" "$S_PORT" "$H_USER" "$H_PASS" "$H_PORT"; s_restart
+    else save_conf "$S_USER" "$S_PASS" "$S_PORT" "$NEW" "$H_PASS" "$H_PORT"; h_restart; fi
+    printf "${G}✔ %s 用户名已改为: %s${N}\n" "$label" "$NEW"; sleep 1
+}
+
+_set_pass() {
+    load_conf; local label="SOCKS5"; local cur="$S_PASS"
+    [ "$1" = "http" ] && { label="HTTP"; cur="$H_PASS"; }
+    printf "\n当前 %s 密码: %s\n新密码 (留空取消): " "$label" "$cur"; read NEW
+    [ -z "$NEW" ] && printf "${Y}已取消${N}\n" && { sleep 1; return; }
+    if [ "$1" = "socks" ]; then save_conf "$S_USER" "$NEW" "$S_PORT" "$H_USER" "$H_PASS" "$H_PORT"; s_restart
+    else save_conf "$S_USER" "$S_PASS" "$S_PORT" "$H_USER" "$NEW" "$H_PORT"; h_restart; fi
+    printf "${G}✔ %s 密码已更新: %s${N}\n" "$label" "$NEW"; sleep 1
+}
+
+_gen_pass() {
+    load_conf; local label="SOCKS5"; local NEW=$(gen_pass)
+    if [ "$1" = "socks" ]; then save_conf "$S_USER" "$NEW" "$S_PORT" "$H_USER" "$H_PASS" "$H_PORT"; s_restart
+    else save_conf "$S_USER" "$S_PASS" "$S_PORT" "$H_USER" "$NEW" "$H_PORT"; h_restart; fi
+    printf "\n${G}✔ %s 新密码: %s${N}\n" "$label" "$NEW"; sleep 1
+}
+
+# ── 4. 防火墙 ──
+
+menu_firewall() {
+    while true; do
+        load_conf; clear; box_top; box_title "防火墙"; box_sep; box_blank
+        # 代理白名单状态
+        FWS=$(/bin/sh "$FW" wl-status 2>/dev/null)
+        if [ "$FWS" = "ON" ]; then
+            WLC=$(/bin/sh "$FW" wl-list 2>/dev/null | wc -l)
+            printf "${C}${B}║${N}  代理白名单: ${G}● 已启用${N}  %s 个 IP" "$WLC"
+            _p=$((16-${#WLC})); [ "$_p" -lt 0 ] && _p=0; printf "%${_p}s ${C}${B}║${N}\n" ""
+            printf "${C}${B}║${N}  ${D}仅白名单 IP 可连接 %s/%s${N}" "$S_PORT" "$H_PORT"
+            _p=$((26-${#S_PORT}-${#H_PORT})); [ "$_p" -lt 0 ] && _p=0; printf "%${_p}s ${C}${B}║${N}\n" ""
+        else
+            printf "${C}${B}║${N}  代理白名单: ${Y}○ 未启用${N} (允许所有)           ${C}${B}║${N}\n"
+        fi
+        # SSH 防护状态
+        SSHS=$(/bin/sh "$FW" ssh-status 2>/dev/null)
+        printf "${C}${B}║${N}  SSH 防暴力: "
+        if [ "$SSHS" = "ON" ]; then
+            printf "${G}● 已启用${N}  60秒内8次新连接→5→10→20→30min"
+            printf "  ${C}${B}║${N}\n"
+        else
+            printf "${Y}○ 未启用${N}                        ${C}${B}║${N}\n"
+        fi
+        box_sep; box_blank
+        box_hdr "[ 代理白名单 ]"
+        box_row "1" "查看白名单"
+        box_row "2" "添加 IP"
+        box_row "3" "删除 IP"
+        box_row "4" "清空白名单 (允许所有)"
+        box_blank
+        box_row "5" "启用代理白名单"
+        box_row "6" "关闭代理白名单"
+        box_blank
+        box_hdr "[ SSH 防暴力 ]"
+        box_row "7" "启用 SSH 防护"
+        box_row "8" "关闭 SSH 防护"
+        box_blank; box_hint "  回车 = 返回上级"; box_bot
+        read_choice || return
+        case "$C" in
+            1) fw_show ;;
+            2) fw_add ;;
+            3) fw_del ;;
+            4) fw_clear ;;
+            5) fw_wl_on ;;
+            6) fw_wl_off ;;
+            7) fw_ssh_on ;;
+            8) fw_ssh_off ;;
+            *) printf "${R}无效选项${N}\n"; sleep 0.5 ;;
+        esac
+    done
+}
+
+fw_show() {
+    printf "\n${B}━━━ 代理白名单 (端口 25022/25023) ━━━${N}\n\n"
+    local IPS=$(/bin/sh "$FW" wl-list 2>/dev/null)
+    if [ -z "$IPS" ]; then
+        printf "  ${Y}(空白名单 — 未启用时允许所有)${N}\n"
+    else
+        local NUM=1
+        echo "$IPS" | while read ip; do
+            [ -z "$ip" ] && continue
+            printf "  ${G}%2s${N}) %s\n" "$NUM" "$ip"
+            NUM=$((NUM+1))
+        done
+    fi
+    printf "\n"; pause_key
+}
+
+fw_add() {
+    printf "\n输入 IP 或 CIDR (如 1.2.3.4 或 10.0.0.0/24)\n: "; read IP
+    [ -z "$IP" ] && printf "${Y}已取消${N}\n" && { sleep 1; return; }
+    echo "$IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/?[0-9]*)$' || \
+        { printf "${R}✘ 格式无效${N}\n"; sleep 1; return; }
+    grep -qF "$IP" "$WL_FILE" 2>/dev/null && \
+        { printf "${Y}已存在${N}\n"; sleep 1; return; }
+    echo "$IP" >> "$WL_FILE"
+    printf "${G}✔ 已添加: %s${N}\n" "$IP"
+    [ "$(/bin/sh "$FW" wl-status 2>/dev/null)" = "ON" ] && /bin/sh "$FW" wl-apply 2>/dev/null && printf "${G}✔ 规则已刷新${N}\n"
+    sleep 1
+}
+
+fw_del() {
+    printf "\n输入要删除的 IP: "; read IP
+    [ -z "$IP" ] && printf "${Y}已取消${N}\n" && { sleep 1; return; }
+    local TMP=$(mktemp); grep -v "^${IP}$" "$WL_FILE" > "$TMP"; mv "$TMP" "$WL_FILE"
+    printf "${G}✔ 已删除: %s${N}\n" "$IP"
+    [ "$(/bin/sh "$FW" wl-status 2>/dev/null)" = "ON" ] && /bin/sh "$FW" wl-apply 2>/dev/null && printf "${G}✔ 规则已刷新${N}\n"
+    sleep 1
+}
+
+fw_clear() {
+    printf "\n${R}⚠ 清空白名单 = 允许所有 IP 连接代理${N}\n确认? (y/N): "; read YN
+    case "$YN" in y|Y) ;; *) printf "${Y}已取消${N}\n"; sleep 1; return ;; esac
+    cat > "$WL_FILE" << 'EOF'
+# US-COX 代理白名单
+# 每行一个 IP 或 CIDR, # 开头为注释
+# 留空 = 允许所有 IP 连接
+EOF
+    /bin/sh "$FW" wl-off 2>/dev/null
+    printf "${G}✔ 白名单已清空${N}\n"; sleep 1
+}
+
+fw_wl_on() {
+    local IPS=$(/bin/sh "$FW" wl-list 2>/dev/null)
+    [ -z "$IPS" ] && { printf "\n${Y}⚠ 白名单为空，请先添加 IP${N}\n"; sleep 1; return; }
+    /bin/sh "$FW" wl-apply 2>/dev/null
+    printf "\n${G}✔ 代理白名单已启用${N}\n  仅以下 IP 可连接端口 %s/%s:\n" "$S_PORT" "$H_PORT"
+    echo "$IPS" | while read ip; do printf "  ${G}%s${N}\n" "$ip"; done
+    sleep 1
+}
+
+fw_wl_off() {
+    /bin/sh "$FW" wl-off 2>/dev/null
+    printf "\n${Y}✔ 代理白名单已关闭 (允许所有)${N}\n"; sleep 1
+}
+
+fw_ssh_on() {
+    /bin/sh "$FW" ssh-on 2>/dev/null
+    printf "\n${G}✔ SSH 防暴力已启用${N}\n"
+    printf "  ${D}60秒内8次新连接→ban, 递增5→10→20→30min${N}\n"
+    printf "  ${D}仅影响端口 22, 不影响代理端口${N}\n"
+    sleep 1
+}
+
+fw_ssh_off() {
+    /bin/sh "$FW" ssh-off 2>/dev/null
+    printf "\n${Y}✔ SSH 防护已关闭${N}\n"; sleep 1
+}
+
+# ── 5. 维护 ──
+
+menu_maint() {
+    while true; do
+        clear; box_top; box_title "维护工具"; box_sep; box_blank
+        box_row "1" "健康检查"; box_row "2" "更新 Microsocks"; box_row "3" "同步 SOCKS5 账密至 HTTP"
+        box_blank; box_hint "  回车 = 返回上级"; box_bot
+        read_choice || return
+        case "$C" in
+            1) _health ;; 2) _update ;; 3) _copy_s2h ;;
+            *) printf "${R}无效选项${N}\n"; sleep 0.5 ;;
+        esac
+    done
+}
+
+_health() {
+    load_conf; [ -f "$HLOCK" ] && printf "${Y}检查进行中${N}\n" && return
+    touch "$HLOCK"; trap "rm -f $HLOCK" EXIT
+    printf "\n检查中..."
+    rc-service microsocks status >/dev/null 2>&1 || rc-service microsocks start >/dev/null 2>&1
+    rc-service tinyproxy status >/dev/null 2>&1 || rc-service tinyproxy start >/dev/null 2>&1
+    SOK=$(curl -x socks5h://${S_USER}:${S_PASS}@127.0.0.1:${S_PORT} \
+        -s --connect-timeout 5 -o /dev/null -w '%{http_code}' https://www.google.com/generate_204 2>/dev/null)
+    HOK=$(curl -x http://${H_USER}:${H_PASS}@127.0.0.1:${H_PORT} \
+        -s --connect-timeout 5 -o /dev/null -w '%{http_code}' https://www.google.com/generate_204 2>/dev/null)
+    rm -f "$HLOCK"; printf "\r\n"
+    SS="✓"; HS="✓"
+    [ "$SOK" != "204" ] && { SS="✘"; s_restart; }
+    [ "$HOK" != "204" ] && { HS="✘"; h_restart; }
+    printf "  SOCKS5: ${G}%s${N}    HTTP: ${G}%s${N}\n\n" "$SS" "$HS"; pause_key
+}
+
+_copy_s2h() {
+    load_conf
+    printf "\n将 SOCKS5 账密 → HTTP:\n  用户: %s → %s\n  密码: %s → %s\n确认? (y/N): " "$H_USER" "$S_USER" "$H_PASS" "$S_PASS"; read YN
+    case "$YN" in y|Y) ;; *) printf "${Y}已取消${N}\n"; sleep 1; return ;; esac
+    save_conf "$S_USER" "$S_PASS" "$S_PORT" "$S_USER" "$S_PASS" "$H_PORT"
+    h_restart; printf "${G}✔ HTTP 账密已同步${N}\n"; sleep 1
+}
+
+_update() {
+    printf "\n${C}正在检查更新...${N}\n"
+    HAS_CC=$(which cc 2>/dev/null); NEED_CLEAN=0
+    [ -z "$HAS_CC" ] && { apk add --no-cache build-base git >/dev/null 2>&1; NEED_CLEAN=1; }
+    [ -f "$SBIN" ] && cp "$SBIN" "$SBIN_BAK"
+    TMPD=$(mktemp -d); cd "$TMPD"
+    printf "下载源码...\n"; git clone --depth 1 "$REPO" . 2>/dev/null
+    if [ $? -ne 0 ]; then
+        printf "${R}✘ 下载失败${N}\n"; [ -f "$SBIN_BAK" ] && mv "$SBIN_BAK" "$SBIN"
+        [ "$NEED_CLEAN" = 1 ] && apk del build-base git >/dev/null 2>&1
+        rm -rf "$TMPD"; pause_key; return
+    fi
+    printf "编译中...\n"; make -j1 >/dev/null 2>&1
+    if [ $? -ne 0 ] || [ ! -f microsocks ]; then
+        printf "${R}✘ 编译失败${N}\n"; [ -f "$SBIN_BAK" ] && mv "$SBIN_BAK" "$SBIN"
+        [ "$NEED_CLEAN" = 1 ] && apk del build-base git >/dev/null 2>&1
+        rm -rf "$TMPD"; pause_key; return
+    fi
+    NV=$(sha256sum microsocks | cut -d' ' -f1); OV=$(sha256sum "$SBIN" 2>/dev/null | cut -d' ' -f1)
+    strip microsocks; cp microsocks "$SBIN"; chmod 755 "$SBIN"; rm -rf "$TMPD" "$SBIN_BAK"
+    [ "$NEED_CLEAN" = 1 ] && { apk del build-base git >/dev/null 2>&1; rm -rf /var/cache/apk/* /root/.cache/*; }
+    [ "$NV" = "$OV" ] && printf "${G}✔ 已是最新版本${N}\n" || printf "${G}✔ 更新完成${N}\n"
+    s_restart; pause_key
+}
+
+# ── Cron ──
+
+install_cron() {
+    CRON_LINE="* * * * * /bin/sh /usr/local/bin/socks health-cron"
+    CURRENT=$(crontab -l 2>/dev/null)
+    echo "$CURRENT" | grep -q "socks health-cron" && return 0
+    printf "%s\n%s\n" "$CURRENT" "$CRON_LINE" | crontab -
+}
+
+# ── 命令行入口 ──
+
+case "$1" in
+    status)
+        migrate_conf; load_conf
+        printf "\n${B}━━━━━━━━ 代理状态 ━━━━━━━━${N}\n"
+        if rc-service microsocks status >/dev/null 2>&1; then
+            PID=$(pgrep -f "$SBIN" 2>/dev/null | head -1)
+            RSS=$(cat /proc/$PID/status 2>/dev/null | grep VmRSS | awk '{print $2,$3}')
+            printf "  SOCKS5:   ${G}运行中${N}  端口 %s  PID %s  内存 %s\n" "$S_PORT" "${PID:--}" "${RSS:--}"
+        else printf "  SOCKS5:   ${R}已停止${N}\n"; fi
+        printf "            用户 %s  密码 %s\n" "$S_USER" "$S_PASS"
+        if rc-service tinyproxy status >/dev/null 2>&1; then
+            PID=$(pgrep -f "tinyproxy" 2>/dev/null | head -1)
+            RSS=$(cat /proc/$PID/status 2>/dev/null | grep VmRSS | awk '{print $2,$3}')
+            printf "  HTTP:     ${G}运行中${N}  端口 %s  PID %s  内存 %s\n" "$H_PORT" "${PID:--}" "${RSS:--}"
+        else printf "  HTTP:     ${R}已停止${N}\n"; fi
+        printf "            用户 %s  密码 %s\n" "$H_USER" "$H_PASS"
+        OUTIP=$(check_ip); printf "  出口IP:   %s\n" "${OUTIP:-(检测失败)}"
+        printf "  磁盘:     %s\n" "$(df -h / | awk 'NR==2{print $3 "/" $2 " (已用" $5 ")"}')"
+        FWS=$(/bin/sh "$FW" wl-status 2>/dev/null)
+        if [ "$FWS" = "ON" ]; then printf "  白名单:   ${G}已启用${N} (%s 个 IP)\n" "$(/bin/sh "$FW" wl-list 2>/dev/null | wc -l)"
+        else printf "  白名单:   ${Y}未启用${N}\n"; fi
+        SSHS=$(/bin/sh "$FW" ssh-status 2>/dev/null)
+        if [ "$SSHS" = "ON" ]; then printf "  SSH防护:  ${G}已启用${N}\n"
+        else printf "  SSH防护:  ${Y}未启用${N}\n"; fi
+        printf "\n"; exit ;;
+    start)   migrate_conf; rc-service microsocks start >/dev/null 2>&1; rc-service tinyproxy start >/dev/null 2>&1; printf "${G}✔ 已启动${N}\n"; exit ;;
+    stop)    rc-service microsocks stop  >/dev/null 2>&1; rc-service tinyproxy stop  >/dev/null 2>&1; printf "${Y}✔ 已停止${N}\n"; exit ;;
+    restart) migrate_conf; all_restart; exit ;;
+    health)  migrate_conf; load_conf; _health; exit ;;
+    health-cron)
+        migrate_conf; load_conf
+        rc-service microsocks status >/dev/null 2>&1 || rc-service microsocks start >/dev/null 2>&1
+        rc-service tinyproxy status >/dev/null 2>&1 || rc-service tinyproxy start >/dev/null 2>&1
+        exit ;;
+    update)  migrate_conf; _update; exit ;;
+    fw-apply) /bin/sh "$FW" all-on; exit ;;
+    fw-off)   /bin/sh "$FW" all-off; exit ;;
+    install-cron) install_cron; printf "${G}✔ 已安装${N}\n"; exit ;;
+    remove-cron)  crontab -l 2>/dev/null | grep -v "socks health-cron" | crontab -; printf "${G}✔ 已移除${N}\n"; exit ;;
+esac
+
+migrate_conf; install_cron; main_menu

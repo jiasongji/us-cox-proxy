@@ -1,0 +1,25 @@
+#!/sbin/openrc-run
+
+name="microsocks"
+description="Lightweight SOCKS5 Proxy"
+command="/usr/local/bin/microsocks"
+command_background="yes"
+pidfile="/run/${name}.pid"
+start_stop_daemon_args="--make-pidfile"
+
+depend() {
+    need net
+    after firewall
+}
+
+start_pre() {
+    local CONF="/etc/microsocks/config"
+    local PORT USER PASS
+    PORT=$(grep "^SOCKS_PORT=" "$CONF" 2>/dev/null | cut -d'"' -f2)
+    USER=$(grep "^SOCKS_USER=" "$CONF" 2>/dev/null | cut -d'"' -f2)
+    PASS=$(grep "^SOCKS_PASS=" "$CONF" 2>/dev/null | cut -d'"' -f2)
+    : ${PORT:=25022}
+    : ${USER:=uscox}
+    : ${PASS:=changeme}
+    command_args="-q -p ${PORT} -u ${USER} -P ${PASS}"
+}

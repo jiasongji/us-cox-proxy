@@ -1,0 +1,163 @@
+# US-COX 代理服务器部署方案
+
+> 一套面向低配 NAT VPS（Alpine Linux / LXC / 200MB RAM）的轻量级 SOCKS5 + HTTP 代理管理方案。
+
+## 特性
+
+| 组件 | 程序 | 内存 | 说明 |
+|------|------|------|------|
+| SOCKS5 代理 | [Microsocks](https://github.com/rofl0r/microsocks) | ~600 KB | 18KB 二进制，epoll 单线程 |
+| HTTP 代理 | Tinyproxy | ~2 MB | Alpine 官方包，144KB |
+| 防火墙 | iptables | 0 | 白名单 + SSH 防暴力 |
+| 管理面板 | socks 脚本 | 0 | Shell 交互菜单 |
+
+**总资源占用：磁盘 ~2MB，内存 ~2.6MB，空闲 CPU 0%**
+
+## 快速部署
+
+### 1. 克隆项目
+
+```bash
+git clone https://github.com/yourname/us-cox-proxy.git
+cd us-cox-proxy
+```
+
+### 2. 一键部署
+
+```bash
+# 方式 A: 通过 SSH 管道部署 (推荐)
+ssh -p <SSH端口> root@<IP> 'sh -s' < deploy.sh
+
+# 方式 B: 先 scp 再运行
+scp -P <SSH端口> -r . root@<IP>:/tmp/us-cox/
+ssh -p <SSH端口> root@<IP> 'sh /tmp/us-cox/deploy.sh'
+```
+
+### 3. 登录管理
+
+```bash
+ssh -p <SSH端口> root@<IP>
+socks    # 进入管理面板
+```
+
+## 管理面板
+
+```
+╔══════════════════════════════════════════╗
+║  US-COX  代理管理  v5                    ║
+╠══════════════════════════════════════════╣
+║  [ 1 ] 服务管理                          ║
+║  [ 2 ] SOCKS5 代理                       ║
+║  [ 3 ] HTTP   代理                       ║
+║  [ 4 ] 防火墙                            ║
+║  [ 5 ] 维护工具                          ║
+║  回车 = 退出                             ║
+╚══════════════════════════════════════════╝
+```
+
+**所有子菜单按回车即可返回上级。**
+
+### 命令行速查
+
+```bash
+socks status     # 查看状态
+socks start      # 启动全部
+socks stop       # 停止全部
+socks restart    # 重启全部
+socks health     # 健康检查
+socks update     # 更新 Microsocks
+```
+
+## 端口规划
+
+| 端口 | 服务 | 说明 |
+|------|------|------|
+| 25021 | SSH | 远程管理（由 NAT 映射） |
+| 25022 | SOCKS5 | Microsocks 代理 |
+| 25023 | HTTP | Tinyproxy 代理 |
+
+## 防火墙
+
+### 代理白名单 (端口 25022/25023)
+
+- 白名单为空 = 允许所有 IP 连接
+- 添加 IP 后启用 = 仅白名单 IP 可用代理
+- SSH 端口 **不受白名单影响**
+
+```bash
+socks → [4] 防火墙 → [2] 添加 IP → 输入 IP → [5] 启用
+```
+
+### SSH 防暴力破解 (端口 22)
+
+- 阈值：60 秒内 8 次新连接 → 触发封禁
+- 惩罚递增：5min → 10min → 20min → 30min
+- 通过代理链路管理时不会误触发
+
+## 项目结构
+
+```
+us-cox-proxy/
+├── README.md                  # 本文件
+├── LICENSE                    # MIT
+├── deploy.sh                  # 一键部署脚本
+├── scripts/
+│   ├── socks                  # 管理面板脚本 → /usr/local/bin/socks
+│   └── firewall.sh            # 防火墙引擎 → /etc/proxy-whitelist/
+├── init.d/
+│   ├── microsocks             # SOCKS5 服务 → /etc/init.d/
+│   └── proxy-firewall         # 防火墙服务 → /etc/init.d/
+└── config/
+    ├── sysctl.conf            # 内核网络参数
+    ├── sshd_config            # SSH 安全配置
+    ├── profile                # 全局 Profile
+    ├── bash.bashrc            # Bashrc
+    ├── resolv.conf            # DNS 配置
+    ├── syslog.conf            # Syslog 精简
+    ├── logrotate.conf         # 日志轮替
+    ├── motd                   # 登录横幅
+    ├── hostname               # 主机名
+    ├── hosts                  # Hosts
+    ├── microsocks.config.example   # SOCKS5 配置模板
+    ├── tinyproxy.conf.example      # HTTP 配置模板
+    ├── ips.conf.example            # 白名单模板
+    └── crontab.example             # 定时任务模板
+```
+
+## 系统优化清单
+
+### 网络参数 (sysctl)
+- BBR 拥塞控制 + TCP Fast Open
+- TCP Keepalive 5 分钟 (适配 NAT 超时)
+- TIME_WAIT 复用 + 端口范围 1024-65535
+- 禁用慢启动重启
+- ICMP 重定向阻断 + 反 IP 欺骗
+
+### 安全加固
+- SSH 仅 Ed25519 + ChaCha20/AES-GCM
+- SSH `MaxAuthTries 3` + `UseDNS no`
+- PVE 后门密钥清除
+- 商家脚本/品牌信息清除
+- 历史记录不自动删除（移除 delete_history.sh）
+- IPv6 禁用（NAT 无 IPv6）
+
+### 磁盘优化
+- Syslog 仅记录 warning 级别
+- Logrotate 每日轮替，保留 1 份，最大 1MB
+- Crontab 每 3 天清理旧日志
+- 卸载不必要包（ruby/python/nano/figlet 等）
+- 最终磁盘占用：**77MB / 625MB (14%)**
+
+### 自动保活
+- Cron 每分钟检测代理进程，崩溃自动拉起
+- `proxy-firewall` 开机自启恢复 iptables 规则
+
+## 适用环境
+
+- Alpine Linux 3.19 (LXC/Incus 容器)
+- 1 CPU / 200MB RAM / 625MB 磁盘
+- NAT VPS (共享宿主机，有限端口映射)
+
+## License
+
+MIT
