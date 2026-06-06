@@ -72,13 +72,13 @@ socks update     # 更新 Microsocks
 
 | 端口 | 服务 | 说明 |
 |------|------|------|
-| 25021 | SSH | 远程管理（由 NAT 映射） |
-| 25022 | SOCKS5 | Microsocks 代理 |
-| 25023 | HTTP | Tinyproxy 代理 |
+| <SSH端口> | SSH | 远程管理（由 NAT 映射） |
+| <SOCKS5端口> | SOCKS5 | Microsocks 代理 |
+| <HTTP端口> | HTTP | Tinyproxy 代理 |
 
 ## 防火墙
 
-### 代理白名单 (端口 25022/25023)
+### 代理白名单 (SOCKS5端口/HTTP端口)
 
 - 白名单为空 = 允许所有 IP 连接
 - 添加 IP 后启用 = 仅白名单 IP 可用代理

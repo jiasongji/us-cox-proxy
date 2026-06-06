@@ -1,7 +1,7 @@
 #!/bin/sh
 # ============================================================
 #  US-COX 防火墙规则
-#  1. 代理白名单 (25022/25023) - 可选
+#  1. 代理白名单 (SOCKS_PORT / HTTP_PORT) - 可选
 #  2. SSH 防暴力破解 (端口 22) - 可选
 # ============================================================
 
@@ -9,10 +9,17 @@ WL_FILE="/etc/proxy-whitelist/ips.conf"
 PROXY_CHAIN="PROXY_WL"
 SSH_CHAIN="SSH_GUARD"
 
+# 从配置文件读取端口
+load_ports() {
+    local CONF="/etc/microsocks/config"
+    [ -f "$CONF" ] && . "$CONF"
+    SOCKS_PORT="${SOCKS_PORT:-25022}"
+    HTTP_PORT="${HTTP_PORT:-25023}"
+}
+
 # ── SSH 防暴力破解 ──
-# 阈值: 60秒内 8 次新连接 → 触发 (正常 SSH 操作不会触发)
+# 阈值: 60秒内 8 次新连接 → 触发
 # 惩罚: 5min → 10min → 20min → 30min 递增
-# 注意: NAT 环境下不同用户可能共享同一出口 IP, 阈值要宽松
 
 ssh_guard_on() {
     iptables -N "$SSH_CHAIN" 2>/dev/null
@@ -20,14 +27,14 @@ ssh_guard_on() {
 
     # Level 3 → DROP 30min
     iptables -A "$SSH_CHAIN" -p tcp --dport 22 -m recent --rcheck --seconds 1800 --rttl --name ssh_ban3 -j DROP
-    # Level 2 → 升级到 Level 3 (20min 内再尝试)
+    # Level 2 → 升级到 Level 3
     iptables -A "$SSH_CHAIN" -p tcp --dport 22 -m recent --rcheck --seconds 1200 --rttl --name ssh_ban2 -m recent --set --name ssh_ban3 -j DROP
-    # Level 1 → 升级到 Level 2 (10min 内再尝试)
+    # Level 1 → 升级到 Level 2
     iptables -A "$SSH_CHAIN" -p tcp --dport 22 -m recent --rcheck --seconds 600 --rttl --name ssh_ban1 -m recent --set --name ssh_ban2 -j DROP
 
-    # 记录所有新连接
+    # 记录新连接
     iptables -A "$SSH_CHAIN" -p tcp --dport 22 -m conntrack --ctstate NEW -m recent --set --name ssh_track
-    # 60秒内 8 次新连接 → ban Level 1 (5min)
+    # 60秒内 8 次 → ban Level 1
     iptables -A "$SSH_CHAIN" -p tcp --dport 22 -m conntrack --ctstate NEW \
         -m recent --rcheck --seconds 60 --hitcount 8 --rttl --name ssh_track \
         -m recent --set --name ssh_ban1 -j DROP
@@ -35,7 +42,6 @@ ssh_guard_on() {
     # 放行正常 SSH
     iptables -A "$SSH_CHAIN" -p tcp --dport 22 -j ACCEPT
 
-    # 挂载到 INPUT 首位
     iptables -C INPUT -j "$SSH_CHAIN" 2>/dev/null || iptables -I INPUT 1 -j "$SSH_CHAIN"
 }
 
@@ -52,6 +58,7 @@ ssh_guard_status() {
 # ── 代理白名单 ──
 
 wl_apply() {
+    load_ports
     iptables -N "$PROXY_CHAIN" 2>/dev/null
     iptables -F "$PROXY_CHAIN" 2>/dev/null
 
@@ -67,9 +74,9 @@ wl_apply() {
 
     echo "$IPS" | while read ip; do
         [ -z "$ip" ] && continue
-        iptables -A "$PROXY_CHAIN" -s "$ip" -p tcp -m multiport --dports 25022,25023 -j ACCEPT 2>/dev/null
+        iptables -A "$PROXY_CHAIN" -s "$ip" -p tcp -m multiport --dports "$SOCKS_PORT,$HTTP_PORT" -j ACCEPT 2>/dev/null
     done
-    iptables -A "$PROXY_CHAIN" -p tcp -m multiport --dports 25022,25023 -j DROP 2>/dev/null
+    iptables -A "$PROXY_CHAIN" -p tcp -m multiport --dports "$SOCKS_PORT,$HTTP_PORT" -j DROP 2>/dev/null
 
     iptables -C INPUT -j "$PROXY_CHAIN" 2>/dev/null || iptables -A INPUT -j "$PROXY_CHAIN"
 }
@@ -81,7 +88,8 @@ wl_off() {
 }
 
 wl_status() {
-    iptables -L "$PROXY_CHAIN" -n 2>/dev/null | grep -q "25022" && echo "ON" || echo "OFF"
+    load_ports
+    iptables -L "$PROXY_CHAIN" -n 2>/dev/null | grep -q "$SOCKS_PORT" && echo "ON" || echo "OFF"
 }
 
 wl_list() {

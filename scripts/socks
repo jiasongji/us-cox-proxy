@@ -13,7 +13,7 @@ REPO="https://github.com/rofl0r/microsocks"
 HLOCK="/tmp/.socks_health_lock"
 WL_FILE="/etc/proxy-whitelist/ips.conf"
 FW="/etc/proxy-whitelist/firewall.sh"
-PUBLIC_IP="23.80.91.245"
+PUBLIC_IP="${PUBLIC_IP:-}"
 
 R='\033[0;31m' G='\033[0;32m' Y='\033[0;33m' C='\033[0;36m' B='\033[1m' D='\033[2m' N='\033[0m'
 
@@ -21,8 +21,8 @@ R='\033[0;31m' G='\033[0;32m' Y='\033[0;33m' C='\033[0;36m' B='\033[1m' D='\033[
 
 load_conf() {
     [ -f "$CONF" ] && . "$CONF"
-    S_USER="${SOCKS_USER:-uscox}"; S_PASS="${SOCKS_PASS:-}"; S_PORT="${SOCKS_PORT:-25022}"
-    H_USER="${HTTP_USER:-${S_USER}}"; H_PASS="${HTTP_PASS:-${S_PASS}}"; H_PORT="${HTTP_PORT:-25023}"
+    S_USER="${SOCKS_USER:-uscox}"; S_PASS="${SOCKS_PASS:-}"; S_PORT=""
+    H_USER="${HTTP_USER:-${S_USER}}"; H_PASS="${HTTP_PASS:-${S_PASS}}"; H_PORT=""
 }
 
 save_conf() {
@@ -75,8 +75,8 @@ TPEOF
 migrate_conf() {
     [ ! -f "$CONF" ] && return; . "$CONF"
     [ -n "${MICROSOCKS_USER}" ] && [ -z "${SOCKS_USER}" ] && \
-        save_conf "${MICROSOCKS_USER}" "${MICROSOCKS_PASS}" "${MICROSOCKS_PORT:-25022}" \
-                  "${MICROSOCKS_USER}" "${MICROSOCKS_PASS}" "25023"
+        save_conf "${MICROSOCKS_USER}" "${MICROSOCKS_PASS}" "${MICROSOCKS_PORT:-1080}" \
+                  "${MICROSOCKS_USER}" "${MICROSOCKS_PASS}" "${HTTP_PORT:-8888}"
 }
 
 # ── 服务 ──
@@ -251,7 +251,7 @@ _show_info() {
         printf "${D}── git 走代理 ──${N}\n"
         printf "  ${Y}git config --global http.proxy socks5h://%s:%s@%s:%s${N}\n\n" "$S_USER" "$S_PASS" "$PUBLIC_IP" "$S_PORT"
         printf "${D}── SSH 动态转发 (本机开 SOCKS5) ──${N}\n"
-        printf "  ${Y}ssh -D 1080 -N -f -p 25021 root@%s${N}\n" "$PUBLIC_IP"
+        printf "  ${Y}ssh -D 1080 -N -f -p ${SSH_PORT:-22} root@%s${N}\n" "$PUBLIC_IP"
         printf "  ${D}然后 curl -x socks5h://127.0.0.1:1080 URL${N}\n\n"
     else
         printf "${B}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}\n"
@@ -360,7 +360,7 @@ menu_firewall() {
 }
 
 fw_show() {
-    printf "\n${B}━━━ 代理白名单 (端口 25022/25023) ━━━${N}\n\n"
+    printf "\n${B}━━━ 代理白名单 (端口 ${S_PORT}/${H_PORT}) ━━━${N}\n\n"
     local IPS=$(/bin/sh "$FW" wl-list 2>/dev/null)
     if [ -z "$IPS" ]; then
         printf "  ${Y}(空白名单 — 未启用时允许所有)${N}\n"
