@@ -1,12 +1,18 @@
 #!/bin/sh
 WL_FILE="/etc/proxy-whitelist/ips.conf"
+ACC_CONF="/etc/microsocks/accounts.conf"
 PROXY_CHAIN="PROXY_WL"
 SSH_CHAIN="SSH_GUARD"
 
-load_ports() {
-    local CONF="/etc/microsocks/config"
-    [ -f "$CONF" ] && . "$CONF"
-    SOCKS_PORT="${SOCKS_PORT:-1080}"
+get_ports() {
+    local PORTS=""
+    [ -f "$ACC_CONF" ] || return
+    while IFS=' ' read -r PORT U P; do
+        [ -z "$PORT" ] && continue
+        echo "$PORT" | grep -q '^#' && continue
+        PORTS="${PORTS},${PORT}"
+    done < "$ACC_CONF"
+    printf '%s' "${PORTS#,}"
 }
 
 ssh_guard_on() {
@@ -23,17 +29,21 @@ ssh_guard_off() { iptables -D INPUT -j "$SSH_CHAIN" 2>/dev/null; iptables -F "$S
 ssh_guard_status() { iptables -L "$SSH_CHAIN" -n 2>/dev/null | grep -q "ssh_track" && echo "ON" || echo "OFF"; }
 
 wl_apply() {
-    load_ports
+    local PORTS=$(get_ports)
+    [ -z "$PORTS" ] && return 1
     iptables -N "$PROXY_CHAIN" 2>/dev/null; iptables -F "$PROXY_CHAIN" 2>/dev/null
-    IPS=""
+    local IPS=""
     [ -f "$WL_FILE" ] && IPS=$(grep -v '^#\|^$\|^[[:space:]]*#' "$WL_FILE" | tr -d ' ' | grep -E '^[0-9]')
     [ -z "$IPS" ] && { iptables -D INPUT -j "$PROXY_CHAIN" 2>/dev/null; return 0; }
-    echo "$IPS" | while read ip; do [ -z "$ip" ] && continue; iptables -A "$PROXY_CHAIN" -s "$ip" -p tcp --dport "$SOCKS_PORT" -j ACCEPT 2>/dev/null; done
-    iptables -A "$PROXY_CHAIN" -p tcp --dport "$SOCKS_PORT" -j DROP 2>/dev/null
+    echo "$IPS" | while read ip; do
+        [ -z "$ip" ] && continue
+        iptables -A "$PROXY_CHAIN" -s "$ip" -p tcp -m multiport --dports "$PORTS" -j ACCEPT 2>/dev/null
+    done
+    iptables -A "$PROXY_CHAIN" -p tcp -m multiport --dports "$PORTS" -j DROP 2>/dev/null
     iptables -C INPUT -j "$PROXY_CHAIN" 2>/dev/null || iptables -A INPUT -j "$PROXY_CHAIN"
 }
 wl_off() { iptables -D INPUT -j "$PROXY_CHAIN" 2>/dev/null; iptables -F "$PROXY_CHAIN" 2>/dev/null; iptables -X "$PROXY_CHAIN" 2>/dev/null; }
-wl_status() { load_ports; iptables -L "$PROXY_CHAIN" -n 2>/dev/null | grep -q "$SOCKS_PORT" && echo "ON" || echo "OFF"; }
+wl_status() { iptables -L "$PROXY_CHAIN" -n 2>/dev/null | grep -q "dpt" && echo "ON" || echo "OFF"; }
 wl_list() { [ -f "$WL_FILE" ] && grep -v '^#\|^$\|^[[:space:]]*#' "$WL_FILE" | tr -d ' ' | grep -E '^[0-9]'; }
 
 case "$1" in

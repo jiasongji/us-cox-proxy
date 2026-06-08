@@ -1,25 +1,42 @@
 #!/sbin/openrc-run
-
 name="microsocks"
-description="Lightweight SOCKS5 Proxy"
+description="Lightweight SOCKS5 Proxy (multi-instance)"
 command="/usr/local/bin/microsocks"
-command_background="yes"
-pidfile="/run/${name}.pid"
-start_stop_daemon_args="--make-pidfile"
+depend() { need net; after firewall; }
 
-depend() {
-    need net
-    after firewall
+start() {
+    local ACC="/etc/microsocks/accounts.conf"
+    [ -f "$ACC" ] || { eerror "No accounts.conf"; return 1; }
+    ebegin "Starting microsocks instances"
+    local n=0
+    while IFS=' ' read -r PORT USER PASS; do
+        [ -z "$PORT" ] && continue
+        echo "$PORT" | grep -q '^#' && continue
+        start-stop-daemon --start --background --make-pidfile \
+            --pidfile "/run/microsocks.${PORT}.pid" \
+            --exec /usr/local/bin/microsocks -- -q -p "${PORT}" -u "${USER}" -P "${PASS}"
+        n=$((n+1))
+    done < "$ACC"
+    eend 0 "Started ${n} instances"
 }
 
-start_pre() {
-    local CONF="/etc/microsocks/config"
-    local PORT USER PASS
-    PORT=$(grep "^SOCKS_PORT=" "$CONF" 2>/dev/null | cut -d'"' -f2)
-    USER=$(grep "^SOCKS_USER=" "$CONF" 2>/dev/null | cut -d'"' -f2)
-    PASS=$(grep "^SOCKS_PASS=" "$CONF" 2>/dev/null | cut -d'"' -f2)
-    : ${PORT:=25022}
-    : ${USER:=uscox}
-    : ${PASS:=changeme}
-    command_args="-q -p ${PORT} -u ${USER} -P ${PASS}"
+stop() {
+    ebegin "Stopping microsocks instances"
+    for pf in /run/microsocks.*.pid; do
+        [ -f "$pf" ] || continue
+        start-stop-daemon --stop --pidfile "$pf" --exec /usr/local/bin/microsocks 2>/dev/null
+        rm -f "$pf"
+    done
+    eend 0
+}
+
+status() {
+    local found=0
+    for pf in /run/microsocks.*.pid; do
+        [ -f "$pf" ] || continue
+        if kill -0 "$(cat "$pf" 2>/dev/null)" 2>/dev/null; then
+            found=1
+        fi
+    done
+    [ "$found" -eq 1 ]
 }
