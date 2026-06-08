@@ -1,11 +1,8 @@
 # do daily/weekly/monthly maintenance
-# min	hour	day	month	weekday	command
 */15	*	*	*	*	run-parts /etc/periodic/15min
 0	*	*	*	*	run-parts /etc/periodic/hourly
 0	2	*	*	*	run-parts /etc/periodic/daily
 0	3	*	*	6	run-parts /etc/periodic/weekly
 0	5	1	*	*	run-parts /etc/periodic/monthly
-
-# 每3天清理日志（适配小磁盘）
-0 0 */3 * * rm -rf /var/log/journal 2>/dev/null; truncate -s 0 /var/log/messages.0 /var/log/messages.1 /var/log/wtmp 2>/dev/null; echo "[$(date)] log cleanup done" >> /var/log/messages
+0 0 */3 * * rm -rf /var/log/journal 2>/dev/null; truncate -s 0 /var/log/messages.0 /var/log/messages.1 /var/log/wtmp 2>/dev/null
 * * * * * /bin/sh /usr/local/bin/socks health-cron
