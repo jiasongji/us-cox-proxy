@@ -1,11 +1,11 @@
 #!/bin/sh
 # ============================================================
-#  US-COX 代理管理脚本 v7
+#  US-COX 代理管理脚本 v7.1
 #  SOCKS5 : Microsocks (多账号)
 #  防火墙 : iptables (白名单 + SSH 防暴力)
 # ============================================================
 
-ACC_CONF="/etc/microsocks/accounts.conf"
+CONF="/etc/microsocks/accounts.conf"
 SBIN="/usr/local/bin/microsocks"
 SBIN_BAK="/usr/local/bin/microsocks.bak"
 REPO="https://github.com/rofl0r/microsocks"
@@ -18,422 +18,372 @@ R='\033[0;31m' G='\033[0;32m' Y='\033[0;33m' C='\033[0;36m' B='\033[1m' D='\033[
 
 # -- Account helpers --
 
-acc_list()   { [ -f "$ACC_CONF" ] && grep -v '^#\|^$' "$ACC_CONF" | grep -E '^[0-9]'; }
-acc_user()   { acc_list | grep "^$1 " | awk '{print $2}'; }
-acc_pass()   { acc_list | grep "^$1 " | awk '{print $3}'; }
-acc_exists() { acc_list | grep -q "^$1 " 2>/dev/null; }
-acc_count()  { acc_list | wc -l; }
-acc_add()    { echo "$1 $2 $3" >> "$ACC_CONF"; }
-acc_del()    { local T=$(mktemp); grep -v "^$1 " "$ACC_CONF" > "$T"; mv "$T" "$ACC_CONF"; }
-acc_mod()    { local T=$(mktemp); grep -v "^$1 " "$ACC_CONF" > "$T"; echo "$1 $2 $3" >> "$T"; mv "$T" "$ACC_CONF"; }
+acc_raw()   { [ -f "$CONF" ] && grep -v '^#\|^$' "$CONF" | grep -E '^[0-9]'; }
+acc_count() { acc_raw | wc -l; }
+acc_nth()   { acc_raw | sed -n "${1}p"; }
+acc_port()  { acc_nth "$1" | awk '{print $1}'; }
+acc_user()  { acc_nth "$1" | awk '{print $2}'; }
+acc_pass()  { acc_nth "$1" | awk '{print $3}'; }
+
+acc_port_exists() { acc_raw | awk -v p="$1" '$1==p{found=1;exit}END{exit !found}'; }
+
+acc_add() {
+    echo "$1 $2 $3" >> "$CONF"
+}
+
+acc_del_nth() {
+    local T=$(mktemp) H=$(mktemp) D=$(mktemp)
+    grep '^#\|^$' "$CONF" > "$H" 2>/dev/null
+    acc_raw | grep -n '.' | grep -v "^${1}:" | sed 's/^[0-9]*://' > "$D"
+    cat "$H" "$D" > "$CONF"; rm -f "$T" "$H" "$D"
+}
+
+acc_set_nth() {
+    local H=$(mktemp) D=$(mktemp)
+    grep '^#\|^$' "$CONF" > "$H" 2>/dev/null
+    acc_raw | awk -v n="$1" -v r="$2 $3 $4" 'NR==n{print r;next}{print}' > "$D"
+    cat "$H" "$D" > "$CONF"; rm -f "$H" "$D"
+}
 
 # -- Service --
-
 svc_restart() { rc-service microsocks restart >/dev/null 2>&1; sleep 0.5; }
 is_running()  { pgrep -f "microsocks.*-p $1" >/dev/null 2>&1; }
 
 # -- UI --
+hr()       { printf "${C}${B}==========================================${N}\n"; }
+pause_key(){ printf "\n${D}按回车键返回...${N}"; read _x; }
+gen_pass() { openssl rand -hex 8 2>/dev/null || cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 16; }
+read_c()   { printf "请选择: "; read C; [ -z "$C" ] && return 1; return 0; }
+read_idx() {
+    local TOTAL=$(acc_count)
+    [ "$TOTAL" -eq 0 ] && { printf "${Y}暂无账号${N}\n"; sleep 1; return 1; }
+    printf "输入序号 (1-%s): " "$TOTAL"; read IDX
+    [ -z "$IDX" ] && { printf "${Y}已取消${N}\n"; return 1; }
+    echo "$IDX" | grep -qE '^[0-9]+$' || { printf "${R}请输入数字${N}\n"; sleep 1; return 1; }
+    [ "$IDX" -lt 1 ] || [ "$IDX" -gt "$TOTAL" ] && { printf "${R}超出范围${N}\n"; sleep 1; return 1; }
+    return 0
+}
 
-box_top()   { printf "${C}${B}+------------------------------------------+${N}\n"; }
-box_title() { printf "${C}${B}|${N}  %-$((40))s ${C}${B}|${N}\n" "$1"; }
-box_sep()   { printf "${C}${B}+------------------------------------------+${N}\n"; }
-box_row()   { printf "${C}${B}|${N}  ${G}%s${N}) %-$((37-${#1}))s ${C}${B}|${N}\n" "$1" "$2"; }
-box_hdr()   { printf "${C}${B}|${N}  ${D}%-$((40))s${C}${B}|${N}\n" "$1"; }
-box_blank() { printf "${C}${B}|${N}                                          ${C}${B}|${N}\n"; }
-box_bot()   { printf "${C}${B}+------------------------------------------+${N}\n"; }
-box_hint()  { printf "${C}${B}|${N}  ${D}%-$((40))s${C}${B}|${N}\n" "$1"; }
-pause_key() { printf "\n${D}按回车键返回...${N}"; read _x; }
-gen_pass()  { openssl rand -hex 8 2>/dev/null || cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 16; }
-check_ip()  { curl -x socks5h://$2:$3@127.0.0.1:$1 -s --connect-timeout 3 https://httpbin.org/ip 2>/dev/null | grep -o '"origin": *"[^"]*"' | cut -d'"' -f4; }
-read_choice() { printf "请选择: "; read C; [ -z "$C" ] && return 1; return 0; }
+show_list() {
+    printf "  %-4s %-6s %-12s %-20s %s\n" "##" "端口" "用户" "密码" "状态"
+    echo "  --------------------------------------------"
+    acc_raw | awk 'BEGIN{OFS="\t"} {print NR, $1, $2, $3}' | while IFS='	' read I PORT USER PASS; do
+        if is_running "$PORT"; then
+            printf "  %-4s %-6s %-12s %-20s ${G}运行${N}\n" "$I" "$PORT" "$USER" "$PASS"
+        else
+            printf "  %-4s %-6s %-12s %-20s ${R}停止${N}\n" "$I" "$PORT" "$USER" "$PASS"
+        fi
+    done
+}
 
 # -- Migration --
-
 migrate_conf() {
     local OLD="/etc/microsocks/config"
     [ ! -f "$OLD" ] && return
-    [ -f "$ACC_CONF" ] && [ "$(acc_count)" -gt 0 ] && return
+    [ -f "$CONF" ] && [ "$(acc_count)" -gt 0 ] && return
     . "$OLD" 2>/dev/null
-    printf "# port user password\n%s %s %s\n" "${SOCKS_PORT:-1080}" "${SOCKS_USER:-uscox}" "${SOCKS_PASS:-changeme}" > "$ACC_CONF"
-    chmod 600 "$ACC_CONF"
+    cat > "$CONF" << ACEOF
+# US-COX SOCKS5
+# 端口 用户 密码
+${SOCKS_PORT:-1080} ${SOCKS_USER:-uscox} ${SOCKS_PASS:-changeme}
+ACEOF
+    chmod 600 "$CONF"
 }
 
-# ── Main menu ──
+# ── Main ──
 
 main_menu() {
     while true; do
-        clear
-        box_top; box_title "US-COX  代理管理  v7"
-        box_sep; box_blank
-        box_hdr "[ 1 ] 服务管理"
-        box_hdr "[ 2 ] SOCKS5 账号"
-        box_hdr "[ 3 ] 防火墙"
-        box_hdr "[ 4 ] 维护工具"
-        box_blank
-        box_hint "  回车 = 退出"
-        box_bot
-        read_choice || { printf "${C}再见${N}\n"; exit 0; }
-        case "$C" in
-            1) menu_service ;; 2) menu_socks ;; 3) menu_firewall ;; 4) menu_maint ;;
-            *) printf "${R}无效选项${N}\n"; sleep 0.5 ;;
-        esac
+        clear; hr
+        printf "${C}${B}  US-COX 代理管理 v7.1${N}\n"; hr
+        printf "\n"
+        printf "  ${G}1${N}) 服务管理\n"
+        printf "  ${G}2${N}) SOCKS5 账号\n"
+        printf "  ${G}3${N}) 防火墙\n"
+        printf "  ${G}4${N}) 维护工具\n"
+        printf "\n  ${D}回车 = 退出${N}\n"; hr
+        read_c || { printf "${C}再见${N}\n"; exit 0; }
+        case "$C" in 1) m_svc ;; 2) m_acc ;; 3) m_fw ;; 4) m_mnt ;; *) printf "${R}无效${N}\n"; sleep 0.5 ;; esac
     done
 }
 
 # ── 1. Service ──
 
-menu_service() {
+m_svc() {
     while true; do
-        clear; box_top; box_title "服务管理"; box_sep
-        printf "\n  %-6s %-10s %-20s %s\n" "端口" "用户" "密码" "状态"
-        echo "  --------------------------------------------------"
-        acc_list | while IFS=' ' read -r PORT USER PASS; do
-            if is_running "$PORT"; then
-                printf "  %-6s %-10s %-20s ${G}* 运行中${N}\n" "$PORT" "$USER" "$PASS"
-            else
-                printf "  %-6s %-10s %-20s ${R}o 已停止${N}\n" "$PORT" "$USER" "$PASS"
-            fi
-        done
-        printf "\n"
-        box_sep; box_blank
-        box_row "1" "启动全部"; box_row "2" "停止全部"; box_row "3" "重启全部"
-        box_blank; box_hint "  回车 = 返回上级"; box_bot
-        read_choice || return
+        clear; hr; printf "${C}${B}  服务管理${N}\n"; hr; printf "\n"
+        show_list; printf "\n"; hr
+        printf "  ${G}1${N}) 启动  ${G}2${N}) 停止  ${G}3${N}) 重启\n"
+        printf "  ${D}回车 = 返回${N}\n"; hr
+        read_c || return
         case "$C" in
-            1) rc-service microsocks start >/dev/null 2>&1; printf "${G}OK 已启动${N}\n"; sleep 1 ;;
-            2) rc-service microsocks stop >/dev/null 2>&1; printf "${Y}OK 已停止${N}\n"; sleep 1 ;;
-            3) svc_restart; printf "${G}OK 已重启${N}\n"; sleep 1 ;;
-            *) printf "${R}无效选项${N}\n"; sleep 0.5 ;;
+            1) rc-service microsocks start >/dev/null 2>&1; printf "${G}OK${N}\n"; sleep 1 ;;
+            2) rc-service microsocks stop >/dev/null 2>&1; printf "${Y}OK${N}\n"; sleep 1 ;;
+            3) svc_restart; printf "${G}OK${N}\n"; sleep 1 ;;
+            *) printf "${R}无效${N}\n"; sleep 0.5 ;;
         esac
     done
 }
 
-# ── 2. SOCKS5 Accounts ──
+# ── 2. SOCKS5 ──
 
-menu_socks() {
+m_acc() {
     while true; do
-        clear
-        box_top; box_title "SOCKS5 账号管理"; box_sep
-        printf "\n  %-6s %-10s %-20s %s\n" "端口" "用户" "密码" "状态"
-        echo "  --------------------------------------------------"
-        acc_list | while IFS=' ' read -r PORT USER PASS; do
-            if is_running "$PORT"; then
-                printf "  %-6s %-10s %-20s ${G}* 运行${N}\n" "$PORT" "$USER" "$PASS"
-            else
-                printf "  %-6s %-10s %-20s ${R}o 停${N}\n" "$PORT" "$USER" "$PASS"
-            fi
-        done
-        printf "\n"
-        box_sep; box_blank
-        box_row "1" "添加账号"
-        box_row "2" "删除账号"
-        box_row "3" "修改用户名"
-        box_row "4" "修改密码"
-        box_row "5" "随机生成密码"
-        box_row "6" "查看连接信息"
-        box_blank; box_hint "  回车 = 返回上级"; box_bot
-        read_choice || return
-        case "$C" in
-            1) sock_add ;; 2) sock_del ;; 3) sock_mod_user ;;
-            4) sock_mod_pass ;; 5) sock_gen_pass ;; 6) sock_info ;;
-            *) printf "${R}无效选项${N}\n"; sleep 0.5 ;;
-        esac
+        clear; hr; printf "${C}${B}  SOCKS5 账号管理${N}\n"; hr; printf "\n"
+        local TOTAL=$(acc_count)
+        if [ "$TOTAL" -eq 0 ]; then
+            printf "  ${Y}暂无账号，请添加${N}\n"
+        else
+            show_list
+        fi
+        printf "\n"; hr
+        printf "  ${G}1${N}) 添加账号\n"
+        printf "  ${G}2${N}) 删除 (选序号)\n"
+        printf "  ${G}3${N}) 改用户名 (选序号)\n"
+        printf "  ${G}4${N}) 改密码   (选序号)\n"
+        printf "  ${G}5${N}) 随机密码 (选序号)\n"
+        printf "  ${G}6${N}) 连接信息 (选序号)\n"
+        printf "  ${D}回车 = 返回${N}\n"; hr
+        read_c || return
+        case "$C" in 1) a_add ;; 2) a_del ;; 3) a_user ;; 4) a_pass ;; 5) a_gen ;; 6) a_info ;; *) printf "${R}无效${N}\n"; sleep 0.5 ;; esac
     done
 }
 
-sock_add() {
+a_add() {
     printf "\n--- 添加新账号 ---\n"
-    printf "端口 (如 25023): "; read PORT
-    [ -z "$PORT" ] && printf "${Y}已取消${N}\n" && { sleep 1; return; }
-    echo "$PORT" | grep -qE '^[0-9]+$' || { printf "${R}X  端口必须是数字${N}\n"; sleep 1; return; }
-    acc_exists "$PORT" && { printf "${R}X  端口 %s 已存在${N}\n" "$PORT"; sleep 1; return; }
+    printf "端口: "; read PORT
+    [ -z "$PORT" ] && { printf "${Y}取消${N}\n"; sleep 1; return; }
+    echo "$PORT" | grep -qE '^[0-9]+$' || { printf "${R}端口必须是数字${N}\n"; sleep 1; return; }
+    acc_port_exists "$PORT" && { printf "${R}端口 %s 已存在${N}\n" "$PORT"; sleep 1; return; }
     printf "用户名: "; read USER
-    [ -z "$USER" ] && printf "${Y}已取消${N}\n" && { sleep 1; return; }
+    [ -z "$USER" ] && { printf "${Y}取消${N}\n"; sleep 1; return; }
     printf "密码 (留空自动生成): "; read PASS
     [ -z "$PASS" ] && PASS=$(gen_pass)
-    acc_add "$PORT" "$USER" "$PASS"
-    svc_restart
-    if is_running "$PORT"; then
-        printf "\n${G}OK 账号已添加并运行${N}\n"
-        printf "  端口: %s  用户: %s  密码: %s\n" "$PORT" "$USER" "$PASS"
-    else
-        printf "\n${R}X  账号已添加但未启动${N}\n"
-    fi
-    sleep 1
+    acc_add "$PORT" "$USER" "$PASS"; svc_restart
+    if is_running "$PORT"; then printf "\n${G}OK 已添加并运行${N}\n"; else printf "\n${Y}已添加但未启动${N}\n"; fi
+    printf "  :%s  %s/%s\n" "$PORT" "$USER" "$PASS"; sleep 1
 }
 
-sock_del() {
-    printf "\n当前账号:\n"
-    acc_list | while IFS=' ' read -r PORT USER PASS; do
-        printf "  %-6s %-10s %s\n" "$PORT" "$USER" "$PASS"
-    done
-    printf "\n输入要删除的端口: "; read PORT
-    [ -z "$PORT" ] && printf "${Y}已取消${N}\n" && { sleep 1; return; }
-    acc_exists "$PORT" || { printf "${R}X  端口 %s 不存在${N}\n" "$PORT"; sleep 1; return; }
-    local USER=$(acc_user "$PORT")
-    local PASS=$(acc_pass "$PORT")
-    printf "${R}!! 确认删除 %s/%s/%s ? (y/N): ${N}" "$PORT" "$USER" "$PASS"; read YN
-    case "$YN" in y|Y) ;; *) printf "${Y}已取消${N}\n"; sleep 1; return ;; esac
-    acc_del "$PORT"
-    svc_restart
-    printf "${G}OK 已删除端口 %s${N}\n" "$PORT"
-    sleep 1
+a_del() {
+    printf "\n"; read_idx || return
+    local P=$(acc_port "$IDX") U=$(acc_user "$IDX") P2=$(acc_pass "$IDX")
+    printf "${R}确认删除 #%s (%s/%s/%s)? (y/N): ${N}" "$IDX" "$P" "$U" "$P2"; read YN
+    case "$YN" in y|Y) ;; *) printf "${Y}取消${N}\n"; sleep 1; return ;; esac
+    acc_del_nth "$IDX"; svc_restart
+    printf "${G}OK #%s (%s) 已删除${N}\n" "$IDX" "$P"; sleep 1
 }
 
-sock_mod_user() {
-    printf "\n输入要修改的端口: "; read PORT
-    [ -z "$PORT" ] && printf "${Y}已取消${N}\n" && { sleep 1; return; }
-    acc_exists "$PORT" || { printf "${R}X  不存在${N}\n"; sleep 1; return; }
-    local OLD_U=$(acc_user "$PORT")
-    printf "当前用户名: %s\n新用户名 (留空取消): " "$OLD_U"; read NEW_U
-    [ -z "$NEW_U" ] && printf "${Y}已取消${N}\n" && { sleep 1; return; }
-    local OLD_P=$(acc_pass "$PORT")
-    acc_mod "$PORT" "$NEW_U" "$OLD_P"
-    svc_restart
-    printf "${G}OK 端口 %s 用户名: %s -> %s${N}\n" "$PORT" "$OLD_U" "$NEW_U"
-    sleep 1
+a_user() {
+    printf "\n"; read_idx || return
+    local P=$(acc_port "$IDX") OU=$(acc_user "$IDX") OP=$(acc_pass "$IDX")
+    printf "当前: #%s :%s 用户 %s\n新用户名: " "$IDX" "$P" "$OU"; read NU
+    [ -z "$NU" ] && { printf "${Y}取消${N}\n"; sleep 1; return; }
+    acc_set_nth "$IDX" "$P" "$NU" "$OP"; svc_restart
+    printf "${G}OK #%s 用户名: %s -> %s${N}\n" "$IDX" "$OU" "$NU"; sleep 1
 }
 
-sock_mod_pass() {
-    printf "\n输入要修改的端口: "; read PORT
-    [ -z "$PORT" ] && printf "${Y}已取消${N}\n" && { sleep 1; return; }
-    acc_exists "$PORT" || { printf "${R}X  不存在${N}\n"; sleep 1; return; }
-    local OLD_P=$(acc_pass "$PORT")
-    printf "当前密码: %s\n新密码 (留空取消): " "$OLD_P"; read NEW_P
-    [ -z "$NEW_P" ] && printf "${Y}已取消${N}\n" && { sleep 1; return; }
-    local OLD_U=$(acc_user "$PORT")
-    acc_mod "$PORT" "$OLD_U" "$NEW_P"
-    svc_restart
-    printf "${G}OK 端口 %s 密码已更新: %s${N}\n" "$PORT" "$NEW_P"
-    sleep 1
+a_pass() {
+    printf "\n"; read_idx || return
+    local P=$(acc_port "$IDX") U=$(acc_user "$IDX") OP=$(acc_pass "$IDX")
+    printf "当前: #%s :%s 密码 %s\n新密码: " "$IDX" "$P" "$OP"; read NP
+    [ -z "$NP" ] && { printf "${Y}取消${N}\n"; sleep 1; return; }
+    acc_set_nth "$IDX" "$P" "$U" "$NP"; svc_restart
+    printf "${G}OK #%s 密码已更新: %s${N}\n" "$IDX" "$NP"; sleep 1
 }
 
-sock_gen_pass() {
-    printf "\n输入要修改的端口: "; read PORT
-    [ -z "$PORT" ] && printf "${Y}已取消${N}\n" && { sleep 1; return; }
-    acc_exists "$PORT" || { printf "${R}X  不存在${N}\n"; sleep 1; return; }
-    local NEW_P=$(gen_pass)
-    local OLD_U=$(acc_user "$PORT")
-    acc_mod "$PORT" "$OLD_U" "$NEW_P"
-    svc_restart
-    printf "\n${G}OK 端口 %s 新密码: %s${N}\n" "$PORT" "$NEW_P"
-    sleep 1
+a_gen() {
+    printf "\n"; read_idx || return
+    local P=$(acc_port "$IDX") U=$(acc_user "$IDX") NP=$(gen_pass)
+    acc_set_nth "$IDX" "$P" "$U" "$NP"; svc_restart
+    printf "${G}OK #%s (: %s) 新密码: %s${N}\n" "$IDX" "$P" "$NP"; sleep 1
 }
 
-sock_info() {
-    printf "\n输入要查看的端口: "; read PORT
-    [ -z "$PORT" ] && printf "${Y}已取消${N}\n" && { sleep 1; return; }
-    acc_exists "$PORT" || { printf "${R}X  不存在${N}\n"; sleep 1; return; }
-    local USER=$(acc_user "$PORT")
-    local PASS=$(acc_pass "$PORT")
-    printf "\n${B}========== SOCKS5 连接信息 ==========${N}\n\n"
+a_info() {
+    printf "\n"; read_idx || return
+    local P=$(acc_port "$IDX") U=$(acc_user "$IDX") P2=$(acc_pass "$IDX")
+    printf "\n${B}========== SOCKS5 #%s ==========${N}\n\n" "$IDX"
     printf "  地址:  ${G}%s${N}\n" "$PUBLIC_IP"
-    printf "  端口:  ${G}%s${N}\n" "$PORT"
-    printf "  用户:  ${G}%s${N}\n" "$USER"
-    printf "  密码:  ${G}%s${N}\n\n" "$PASS"
+    printf "  端口:  ${G}%s${N}\n" "$P"
+    printf "  用户:  ${G}%s${N}\n" "$U"
+    printf "  密码:  ${G}%s${N}\n\n" "$P2"
     printf "${D}-- curl --${N}\n"
-    printf "  ${Y}curl -x socks5h://%s:%s@%s:%s https://httpbin.org/ip${N}\n\n" "$USER" "$PASS" "$PUBLIC_IP" "$PORT"
+    printf "  ${Y}curl -x socks5h://%s:%s@%s:%s https://httpbin.org/ip${N}\n\n" "$U" "$P2" "$PUBLIC_IP" "$P"
     printf "${D}-- 环境变量 --${N}\n"
-    printf "  ${Y}export ALL_PROXY=socks5h://%s:%s@%s:%s${N}\n" "$USER" "$PASS" "$PUBLIC_IP" "$PORT"
+    printf "  ${Y}export ALL_PROXY=socks5h://%s:%s@%s:%s${N}\n" "$U" "$P2" "$PUBLIC_IP" "$P"
     printf "  ${Y}export http_proxy=\$ALL_PROXY${N}\n"
     printf "  ${Y}export https_proxy=\$ALL_PROXY${N}\n\n"
     printf "${D}-- git --${N}\n"
-    printf "  ${Y}git config --global http.proxy socks5h://%s:%s@%s:%s${N}\n\n" "$USER" "$PASS" "$PUBLIC_IP" "$PORT"
+    printf "  ${Y}git config --global http.proxy socks5h://%s:%s@%s:%s${N}\n\n" "$U" "$P2" "$PUBLIC_IP" "$P"
     printf "${D}-- SwitchyOmega --${N}\n"
-    printf "  协议: ${C}SOCKS5${N}  地址: ${C}%s${N}  端口: ${C}%s${N}\n\n" "$PUBLIC_IP" "$PORT"
+    printf "  协议: ${C}SOCKS5${N}  地址: ${C}%s${N}  端口: ${C}%s${N}\n\n" "$PUBLIC_IP" "$P"
     pause_key
 }
 
 # ── 3. Firewall ──
 
-menu_firewall() {
+m_fw() {
     while true; do
-        clear; box_top; box_title "防火墙"; box_sep; box_blank
-        FWS=$(/bin/sh "$FW" wl-status 2>/dev/null)
+        clear; hr; printf "${C}${B}  防火墙${N}\n"; hr; printf "\n"
+        local FWS=$(/bin/sh "$FW" wl-status 2>/dev/null)
         if [ "$FWS" = "ON" ]; then
-            WLC=$(/bin/sh "$FW" wl-list 2>/dev/null | wc -l)
-            printf "${C}${B}|${N}  代理白名单: ${G}* 已启用${N}  %s 个 IP" "$WLC"; _p=$((16-${#WLC})); [ "$_p" -lt 0 ] && _p=0; printf "%${_p}s ${C}${B}|${N}\n" ""
+            local WLC=$(/bin/sh "$FW" wl-list 2>/dev/null | wc -l)
+            printf "  白名单: ${G}已启用${N} (%s 个 IP)\n" "$WLC"
         else
-            printf "${C}${B}|${N}  代理白名单: ${Y}o 未启用${N} (允许所有)            ${C}${B}|${N}\n"
+            printf "  白名单: ${Y}未启用${N} (允许所有)\n"
         fi
-        SSHS=$(/bin/sh "$FW" ssh-status 2>/dev/null)
-        printf "${C}${B}|${N}  SSH 防暴力: "
-        if [ "$SSHS" = "ON" ]; then printf "${G}* 已启用${N} 60s/8->递增封禁"; else printf "${Y}o 未启用${N}                   "; fi
-        printf " ${C}${B}|${N}\n"
-        box_sep; box_blank
-        box_hdr "[ 代理白名单 ]"
-        box_row "1" "查看白名单"; box_row "2" "添加 IP"; box_row "3" "删除 IP"; box_row "4" "清空白名单"
-        box_blank
-        box_row "5" "启用白名单"; box_row "6" "关闭白名单"
-        box_blank
-        box_hdr "[ SSH 防暴力 ]"
-        box_row "7" "启用 SSH 防护"; box_row "8" "关闭 SSH 防护"
-        box_blank; box_hint "  回车 = 返回上级"; box_bot
-        read_choice || return
-        case "$C" in
-            1) fw_show ;; 2) fw_add ;; 3) fw_del ;; 4) fw_clear ;;
-            5) fw_wl_on ;; 6) fw_wl_off ;; 7) fw_ssh_on ;; 8) fw_ssh_off ;;
-            *) printf "${R}无效选项${N}\n"; sleep 0.5 ;;
-        esac
+        local SSHS=$(/bin/sh "$FW" ssh-status 2>/dev/null)
+        [ "$SSHS" = "ON" ] && printf "  SSH防护: ${G}已启用${N} (60s/8次 -> 递增封禁)\n" || printf "  SSH防护: ${Y}未启用${N}\n"
+        printf "\n"; hr
+        printf "  ${D}-- 白名单 --${N}\n"
+        printf "  ${G}1${N}) 查看  ${G}2${N}) 添加  ${G}3${N}) 删除  ${G}4${N}) 清空\n"
+        printf "  ${G}5${N}) 启用白名单  ${G}6${N}) 关闭白名单\n"
+        printf "  ${D}-- SSH --${N}\n"
+        printf "  ${G}7${N}) 启用 SSH 防护  ${G}8${N}) 关闭 SSH 防护\n"
+        printf "  ${D}回车 = 返回${N}\n"; hr
+        read_c || return
+        case "$C" in 1) fw_show ;; 2) fw_add ;; 3) fw_del ;; 4) fw_clear ;; 5) fw_wlon ;; 6) fw_wloff ;; 7) fw_sshon ;; 8) fw_sshoff ;; *) printf "${R}无效${N}\n"; sleep 0.5 ;; esac
     done
 }
 
 fw_show() {
-    printf "\n${B}=== 代理白名单 ===${N}\n\n"
+    printf "\n${B}=== 白名单 ===${N}\n\n"
     local IPS=$(/bin/sh "$FW" wl-list 2>/dev/null)
-    if [ -z "$IPS" ]; then printf "  ${Y}(空白名单)${N}\n"; else local NUM=1; echo "$IPS" | while read ip; do [ -z "$ip" ] && continue; printf "  ${G}%2s${N}) %s\n" "$NUM" "$ip"; NUM=$((NUM+1)); done; fi
+    [ -z "$IPS" ] && printf "  ${Y}(空)${N}\n" || echo "$IPS" | nl -w3 -s') '
     printf "\n"; pause_key
 }
 
 fw_add() {
-    printf "\n输入 IP 或 CIDR (如 1.2.3.4 或 10.0.0.0/24)\n: "; read IP
-    [ -z "$IP" ] && printf "${Y}已取消${N}\n" && { sleep 1; return; }
-    echo "$IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/?[0-9]*)$' || { printf "${R}X  格式无效${N}\n"; sleep 1; return; }
+    printf "\n输入 IP 或 CIDR: "; read IP
+    [ -z "$IP" ] && { printf "${Y}取消${N}\n"; sleep 1; return; }
+    echo "$IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/?[0-9]*)$' || { printf "${R}格式无效${N}\n"; sleep 1; return; }
     grep -qF "$IP" "$WL_FILE" 2>/dev/null && { printf "${Y}已存在${N}\n"; sleep 1; return; }
-    echo "$IP" >> "$WL_FILE"
-    printf "${G}OK 已添加: %s${N}\n" "$IP"
+    echo "$IP" >> "$WL_FILE"; printf "${G}OK${N}\n"
     [ "$(/bin/sh "$FW" wl-status 2>/dev/null)" = "ON" ] && /bin/sh "$FW" wl-apply 2>/dev/null
     sleep 1
 }
 
 fw_del() {
     printf "\n输入要删除的 IP: "; read IP
-    [ -z "$IP" ] && printf "${Y}已取消${N}\n" && { sleep 1; return; }
-    local TMP=$(mktemp); grep -v "^${IP}$" "$WL_FILE" > "$TMP"; mv "$TMP" "$WL_FILE"
-    printf "${G}OK 已删除: %s${N}\n" "$IP"
+    [ -z "$IP" ] && { printf "${Y}取消${N}\n"; sleep 1; return; }
+    grep -v "^${IP}$" "$WL_FILE" > "${WL_FILE}.tmp"; mv "${WL_FILE}.tmp" "$WL_FILE"
+    printf "${G}OK${N}\n"
     [ "$(/bin/sh "$FW" wl-status 2>/dev/null)" = "ON" ] && /bin/sh "$FW" wl-apply 2>/dev/null
     sleep 1
 }
 
 fw_clear() {
-    printf "\n${R}!! 清空白名单 = 允许所有 IP${N}\n确认? (y/N): "; read YN
-    case "$YN" in y|Y) ;; *) printf "${Y}已取消${N}\n"; sleep 1; return ;; esac
+    printf "\n${R}!! 清空 = 允许所有 IP${N}\n确认? (y/N): "; read YN
+    case "$YN" in y|Y) ;; *) printf "${Y}取消${N}\n"; sleep 1; return ;; esac
     cat > "$WL_FILE" << 'EOF'
 # US-COX 代理白名单
-# 每行一个 IP 或 CIDR, # 开头为注释
+# 每行一个 IP 或 CIDR
 EOF
-    /bin/sh "$FW" wl-off 2>/dev/null
-    printf "${G}OK 白名单已清空${N}\n"; sleep 1
+    /bin/sh "$FW" wl-off 2>/dev/null; printf "${G}OK${N}\n"; sleep 1
 }
 
-fw_wl_on() {
+fw_wlon() {
     local IPS=$(/bin/sh "$FW" wl-list 2>/dev/null)
-    [ -z "$IPS" ] && { printf "\n${Y}!! 白名单为空，请先添加 IP${N}\n"; sleep 1; return; }
+    [ -z "$IPS" ] && { printf "\n${Y}!! 白名单为空，先添加 IP${N}\n"; sleep 1; return; }
     /bin/sh "$FW" wl-apply 2>/dev/null
-    printf "\n${G}OK 白名单已启用${N}\n仅以下 IP 可连接:\n"
+    printf "\n${G}OK 白名单已启用${N}\n"
     echo "$IPS" | while read ip; do printf "  ${G}%s${N}\n" "$ip"; done
     sleep 1
 }
 
-fw_wl_off() { /bin/sh "$FW" wl-off 2>/dev/null; printf "\n${Y}OK 白名单已关闭 (允许所有)${N}\n"; sleep 1; }
+fw_wloff() { /bin/sh "$FW" wl-off 2>/dev/null; printf "\n${Y}OK 白名单已关闭${N}\n"; sleep 1; }
 
-fw_ssh_on() {
+fw_sshon() {
     /bin/sh "$FW" ssh-on 2>/dev/null
-    printf "\n${G}OK SSH 防暴力已启用${N}\n  ${D}60s内8次新连接->ban, 递增5->10->20->30min${N}\n"
-    sleep 1
+    printf "\n${G}OK SSH 防护已启用${N}\n  60s/8次 -> 5/10/20/30min\n"; sleep 1
 }
 
-fw_ssh_off() { /bin/sh "$FW" ssh-off 2>/dev/null; printf "\n${Y}OK SSH 防护已关闭${N}\n"; sleep 1; }
+fw_sshoff() { /bin/sh "$FW" ssh-off 2>/dev/null; printf "\n${Y}OK SSH 防护已关闭${N}\n"; sleep 1; }
 
 # ── 4. Maintenance ──
 
-menu_maint() {
+m_mnt() {
     while true; do
-        clear; box_top; box_title "维护工具"; box_sep; box_blank
-        box_row "1" "健康检查"; box_row "2" "更新 Microsocks"
-        box_blank; box_hint "  回车 = 返回上级"; box_bot
-        read_choice || return
-        case "$C" in
-            1) _health ;; 2) _update ;;
-            *) printf "${R}无效选项${N}\n"; sleep 0.5 ;;
-        esac
+        clear; hr; printf "${C}${B}  维护工具${N}\n"; hr; printf "\n"
+        printf "  ${G}1${N}) 健康检查\n"
+        printf "  ${G}2${N}) 更新 Microsocks\n"
+        printf "  ${D}回车 = 返回${N}\n"; hr
+        read_c || return
+        case "$C" in 1) do_health ;; 2) do_update ;; *) printf "${R}无效${N}\n"; sleep 0.5 ;; esac
     done
 }
 
-_health() {
-    [ -f "$HLOCK" ] && printf "${Y}检查进行中${N}\n" && return
+do_health() {
+    [ -f "$HLOCK" ] && { printf "${Y}检查中${N}\n"; return; }
     touch "$HLOCK"; trap "rm -f $HLOCK" EXIT
     printf "\n检查中...\n"
     rc-service microsocks status >/dev/null 2>&1 || rc-service microsocks start >/dev/null 2>&1
     sleep 0.5
-    acc_list | while IFS=' ' read -r PORT USER PASS; do
-        SOK=$(curl -x socks5h://${USER}:${PASS}@127.0.0.1:${PORT} \
-            -s --connect-timeout 5 -o /dev/null -w '%{http_code}' https://www.google.com/generate_204 2>/dev/null)
-        if [ "$SOK" = "204" ]; then
-            printf "  %s: ${G}OK 正常${N}\n" "$PORT"
-        else
-            printf "  %s: ${R}X  失败${N}\n" "$PORT"
-        fi
+    acc_raw | while IFS=' ' read -r PORT USER PASS; do
+        local SOK=$(curl -x socks5h://${USER}:${PASS}@127.0.0.1:${PORT} -s --connect-timeout 5 -o /dev/null -w '%{http_code}' https://www.google.com/generate_204 2>/dev/null)
+        [ "$SOK" = "204" ] && printf "  :%s ${G}OK${N}\n" "$PORT" || printf "  :%s ${R}FAIL${N}\n" "$PORT"
     done
-    rm -f "$HLOCK"
-    printf "\n"; pause_key
+    rm -f "$HLOCK"; printf "\n"; pause_key
 }
 
-_update() {
-    printf "\n${C}正在检查更新...${N}\n"
-    HAS_CC=$(which cc 2>/dev/null); NEED_CLEAN=0
-    [ -z "$HAS_CC" ] && { apk add --no-cache build-base git >/dev/null 2>&1; NEED_CLEAN=1; }
+do_update() {
+    printf "\n${C}检查更新...${N}\n"
+    local NEED_CLEAN=0
+    which cc >/dev/null 2>&1 || { apk add --no-cache build-base git >/dev/null 2>&1; NEED_CLEAN=1; }
     [ -f "$SBIN" ] && cp "$SBIN" "$SBIN_BAK"
-    TMPD=$(mktemp -d); cd "$TMPD"
-    printf "下载源码...\n"; git clone --depth 1 "$REPO" . 2>/dev/null
+    local TMPD=$(mktemp -d); cd "$TMPD"
+    printf "下载中...\n"; git clone --depth 1 "$REPO" . 2>/dev/null
     if [ $? -ne 0 ]; then
-        printf "${R}X  下载失败${N}\n"; [ -f "$SBIN_BAK" ] && mv "$SBIN_BAK" "$SBIN"
+        printf "${R}下载失败${N}\n"; [ -f "$SBIN_BAK" ] && mv "$SBIN_BAK" "$SBIN"
         [ "$NEED_CLEAN" = 1 ] && apk del build-base git >/dev/null 2>&1
         rm -rf "$TMPD"; pause_key; return
     fi
     printf "编译中...\n"; make -j1 >/dev/null 2>&1
     if [ $? -ne 0 ] || [ ! -f microsocks ]; then
-        printf "${R}X  编译失败${N}\n"; [ -f "$SBIN_BAK" ] && mv "$SBIN_BAK" "$SBIN"
+        printf "${R}编译失败${N}\n"; [ -f "$SBIN_BAK" ] && mv "$SBIN_BAK" "$SBIN"
         [ "$NEED_CLEAN" = 1 ] && apk del build-base git >/dev/null 2>&1
         rm -rf "$TMPD"; pause_key; return
     fi
-    NV=$(sha256sum microsocks | cut -d' ' -f1); OV=$(sha256sum "$SBIN" 2>/dev/null | cut -d' ' -f1)
+    local NV=$(sha256sum microsocks | cut -d' ' -f1) OV=$(sha256sum "$SBIN" 2>/dev/null | cut -d' ' -f1)
     strip microsocks; cp microsocks "$SBIN"; chmod 755 "$SBIN"; rm -rf "$TMPD" "$SBIN_BAK"
     [ "$NEED_CLEAN" = 1 ] && { apk del build-base git >/dev/null 2>&1; rm -rf /var/cache/apk/* /root/.cache/*; }
-    [ "$NV" = "$OV" ] && printf "${G}OK 已是最新版本${N}\n" || printf "${G}OK 更新完成${N}\n"
+    [ "$NV" = "$OV" ] && printf "${G}已是最新${N}\n" || printf "${G}更新完成${N}\n"
     svc_restart; pause_key
 }
 
-# ── Cron ──
-
+# -- Cron --
 install_cron() {
-    CRON_LINE="* * * * * /bin/sh /usr/local/bin/socks health-cron"
-    CURRENT=$(crontab -l 2>/dev/null)
-    echo "$CURRENT" | grep -q "socks health-cron" && return 0
-    printf "%s\n%s\n" "$CURRENT" "$CRON_LINE" | crontab -
+    local CL="* * * * * /bin/sh /usr/local/bin/socks health-cron"
+    crontab -l 2>/dev/null | grep -q "socks health-cron" && return 0
+    (crontab -l 2>/dev/null; echo "$CL") | crontab -
 }
 
-# ── CLI ──
-
+# -- CLI --
 case "$1" in
     status)
         migrate_conf
         printf "\n${B}========== 代理状态 ==========${N}\n"
-        acc_list | while IFS=' ' read -r PORT USER PASS; do
+        acc_raw | awk '{print NR, $1, $2, $3}' | while IFS=' ' read I PORT USER PASS; do
             if is_running "$PORT"; then
                 PID=$(pgrep -f "microsocks.*-p ${PORT}" 2>/dev/null | head -1)
                 RSS=$(cat /proc/$PID/status 2>/dev/null | grep VmRSS | awk '{print $2,$3}')
-                printf "  SOCKS5:   ${G}运行中${N}  端口 %s  PID %s  内存 %s\n" "$PORT" "${PID:--}" "${RSS:--}"
+                printf "  #%s SOCKS5 ${G}运行${N}  :%s  PID %s  内存 %s\n" "$I" "$PORT" "${PID:--}" "${RSS:--}"
             else
-                printf "  SOCKS5:   ${R}已停止${N}  端口 %s\n" "$PORT"
+                printf "  #%s SOCKS5 ${R}停止${N}  :%s\n" "$I" "$PORT"
             fi
-            printf "            用户 %s  密码 %s\n" "$USER" "$PASS"
+            printf "     用户 %s  密码 %s\n" "$USER" "$PASS"
         done
-        printf "  磁盘:     %s\n" "$(df -h / | awk 'NR==2{print $3 "/" $2 " (已用" $5 ")"}')"
+        printf "  磁盘: %s\n" "$(df -h / | awk 'NR==2{print $3"/"$2" (已用"$5")"}')"
         FWS=$(/bin/sh "$FW" wl-status 2>/dev/null)
-        if [ "$FWS" = "ON" ]; then printf "  白名单:   ${G}已启用${N} (%s 个 IP)\n" "$(/bin/sh "$FW" wl-list 2>/dev/null | wc -l)"; else printf "  白名单:   ${Y}未启用${N}\n"; fi
+        [ "$FWS" = "ON" ] && printf "  白名单: ${G}已启用${N} (%s IP)\n" "$(/bin/sh "$FW" wl-list 2>/dev/null | wc -l)" || printf "  白名单: ${Y}未启用${N}\n"
         SSHS=$(/bin/sh "$FW" ssh-status 2>/dev/null)
-        if [ "$SSHS" = "ON" ]; then printf "  SSH防护:  ${G}已启用${N}\n"; else printf "  SSH防护:  ${Y}未启用${N}\n"; fi
+        [ "$SSHS" = "ON" ] && printf "  SSH防护: ${G}已启用${N}\n" || printf "  SSH防护: ${Y}未启用${N}\n"
         printf "\n"; exit ;;
-    start)   migrate_conf; rc-service microsocks start >/dev/null 2>&1; printf "${G}OK 已启动${N}\n"; exit ;;
-    stop)    rc-service microsocks stop >/dev/null 2>&1; printf "${Y}OK 已停止${N}\n"; exit ;;
+    start)   migrate_conf; rc-service microsocks start >/dev/null 2>&1; printf "${G}OK${N}\n"; exit ;;
+    stop)    rc-service microsocks stop >/dev/null 2>&1; printf "${Y}OK${N}\n"; exit ;;
     restart) migrate_conf; svc_restart; exit ;;
-    health)  migrate_conf; _health; exit ;;
-    health-cron)
-        migrate_conf
-        rc-service microsocks status >/dev/null 2>&1 || rc-service microsocks start >/dev/null 2>&1
-        exit ;;
-    update)  migrate_conf; _update; exit ;;
+    health)  migrate_conf; do_health; exit ;;
+    health-cron) migrate_conf; rc-service microsocks status >/dev/null 2>&1 || rc-service microsocks start >/dev/null 2>&1; exit ;;
+    update)  migrate_conf; do_update; exit ;;
     fw-apply) /bin/sh "$FW" all-on; exit ;;
     fw-off)   /bin/sh "$FW" all-off; exit ;;
     install-cron) install_cron; printf "${G}OK${N}\n"; exit ;;
