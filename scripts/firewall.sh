@@ -43,7 +43,7 @@ wl_apply() {
     iptables -C INPUT -j "$PROXY_CHAIN" 2>/dev/null || iptables -A INPUT -j "$PROXY_CHAIN"
 }
 wl_off() { iptables -D INPUT -j "$PROXY_CHAIN" 2>/dev/null; iptables -F "$PROXY_CHAIN" 2>/dev/null; iptables -X "$PROXY_CHAIN" 2>/dev/null; }
-wl_status() { iptables -L "$PROXY_CHAIN" -n 2>/dev/null | grep -q "dpt" && echo "ON" || echo "OFF"; }
+wl_status() { iptables -L "$PROXY_CHAIN" -n 2>/dev/null | grep -qE "dpt|dports" && echo "ON" || echo "OFF"; }
 wl_list() { [ -f "$WL_FILE" ] && grep -v '^#\|^$\|^[[:space:]]*#' "$WL_FILE" | tr -d ' ' | grep -E '^[0-9]'; }
 
 case "$1" in
